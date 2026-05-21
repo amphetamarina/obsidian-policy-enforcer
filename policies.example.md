@@ -36,6 +36,19 @@ clarification. Flag a TODO if any of the following apply:
 When flagging, the reason should suggest how to break it down,
 e.g. "split into separate todos for refactor / ship / docs".
 
+# Policy: sub-todos-complete
+
+A TODO marked `[x]` that has sub-todos must have every sub-todo
+(and every nested descendant) also marked `[x]`. If any descendant
+is still `[ ]`, the parent's completion claim is premature: flag
+the parent line with a reason like "sub-todo on line N is still
+open".
+
+This rule is purely structural — you can decide it from the
+indented outline above without needing to read the note body. If
+multiple ancestors of an open leaf are checked, flag each one
+independently, because each made a separate completion claim.
+
 # Policy: parent-needs-deliverable
 
 A TODO marked `[x]` that has sub-todos must itself reference a
@@ -43,6 +56,3 @@ single overall deliverable (the rolled-up outcome), in addition to
 each sub-todo having its own deliverable. Flag a checked parent
 with sub-todos that has no parent-level deliverable, with a reason
 like "parent task is complete but no overall deliverable linked".
-
-The sub-todo completeness check is enforced separately (built-in
-rule "sub-todos-complete") and does not need a policy here.

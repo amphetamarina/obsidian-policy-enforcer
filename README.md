@@ -19,7 +19,10 @@ Early. The first shipped policy set covers TODO discipline:
 4. When a new daily note is created, every incomplete TODO from the
    most recent prior daily note is carried over under `## Carried over`.
 
-Policies 1–3 run on every note save (debounced). Policy 4 runs once
+Policies 1–3 are defined in `policies.md` and run on every note save
+(debounced). Each policy is sent to Claude as plain prose; the plugin
+itself has no hardcoded rules, so you can edit, replace, or add to
+them freely. Policy 4 is daily-note infrastructure and runs once
 when a new `YYYY-MM-DD.md` file is created.
 
 ## How it works
@@ -27,11 +30,10 @@ when a new `YYYY-MM-DD.md` file is created.
 ```
 note edit
   -> debounce
-  -> parse TODOs                                     (pure)
-  -> built-in: parent/sub-todo completion rule       (pure)
+  -> parse TODOs into an outline                     (pure)
   -> for each policy in policies.md:
-       send prompt to `claude -p`                    (subprocess)
-       parse JSON array of {line, reason}            (pure)
+       send prompt with outline + note to `claude -p`  (subprocess)
+       parse JSON array of {line, reason}              (pure)
   -> revert flagged [x] to [ ] and append
        <!-- policy:<id>: <reason> --> on each line   (pure)
   -> write back to the vault if anything changed

@@ -1,6 +1,6 @@
 import type { ClaudeClient } from "./claudeClient";
 import type { Policy } from "./policyLoader";
-import { flatten, parseTodos, type TodoNode } from "./todoParser";
+import { parseTodos, type TodoNode } from "./todoParser";
 
 export interface Violation {
   line: number;
@@ -15,36 +15,15 @@ export interface EvaluateInput {
   timeoutMs?: number;
 }
 
-export function subTodoCompletionRule(roots: TodoNode[]): Violation[] {
-  const violations: Violation[] = [];
-
-  const hasUncheckedDescendant = (node: TodoNode): boolean =>
-    node.children.some((c) => !c.checked || hasUncheckedDescendant(c));
-
-  const walk = (node: TodoNode) => {
-    if (node.checked && hasUncheckedDescendant(node)) {
-      violations.push({
-        line: node.line,
-        policyId: "sub-todos-complete",
-        reason: "Parent marked complete but a sub-todo is still open.",
-      });
-    }
-    node.children.forEach(walk);
-  };
-
-  roots.forEach(walk);
-  return violations;
-}
-
 export async function evaluateNote(input: EvaluateInput): Promise<Violation[]> {
   const tree = parseTodos(input.noteContent);
-  const violations: Violation[] = [...subTodoCompletionRule(tree)];
+  if (tree.length === 0) return [];
 
-  const checked = flatten(tree).filter((t) => t.checked);
-  if (checked.length === 0) return violations;
+  const violations: Violation[] = [];
+  const outline = renderOutline(tree);
 
   for (const policy of input.policies) {
-    const prompt = buildPrompt(policy, input.noteContent, checked);
+    const prompt = buildPrompt(policy, input.noteContent, outline);
     const result = await input.claude.invoke({ prompt, timeoutMs: input.timeoutMs });
     if (!result.ok) continue;
 
@@ -95,11 +74,19 @@ function stripCodeFence(text: string): string {
   return match ? match[1] : text;
 }
 
-function buildPrompt(policy: Policy, noteContent: string, checked: TodoNode[]): string {
-  const checkedList = checked
-    .map((t) => `- line ${t.line}: ${t.text}`)
-    .join("\n");
+export function renderOutline(roots: TodoNode[]): string {
+  const lines: string[] = [];
+  const walk = (node: TodoNode, depth: number) => {
+    const indent = "  ".repeat(depth);
+    const box = node.checked ? "[x]" : "[ ]";
+    lines.push(`${indent}- line ${node.line} ${box} ${node.text}`);
+    node.children.forEach((c) => walk(c, depth + 1));
+  };
+  roots.forEach((n) => walk(n, 0));
+  return lines.join("\n");
+}
 
+function buildPrompt(policy: Policy, noteContent: string, outline: string): string {
   return [
     "You are enforcing a single note policy. Read the policy and the note,",
     "then return ONLY a JSON array of violations. No prose, no preamble.",
@@ -107,8 +94,11 @@ function buildPrompt(policy: Policy, noteContent: string, checked: TodoNode[]): 
     `# Policy: ${policy.id}`,
     policy.prompt,
     "",
-    "# Checked TODOs in this note",
-    checkedList,
+    "# All TODOs in this note",
+    "Each line shows: indentation (sub-todos are indented under their parent),",
+    "the source line number, checkbox state ([ ] open, [x] complete), and text.",
+    "",
+    outline,
     "",
     "# Full note content",
     "```markdown",
@@ -118,6 +108,7 @@ function buildPrompt(policy: Policy, noteContent: string, checked: TodoNode[]): 
     "# Output format",
     "Respond with a JSON array. Each element MUST have shape:",
     '  { "line": <number>, "reason": "<short explanation>" }',
+    "Use the `line` number shown in the outline above.",
     "If there are no violations, respond with []. Do not wrap in code fences.",
   ].join("\n");
 }

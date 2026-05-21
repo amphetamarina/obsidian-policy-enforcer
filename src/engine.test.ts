@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { ClaudeClient, ClaudeResult } from "./claudeClient";
-import { evaluateNote, subTodoCompletionRule } from "./engine";
+import { evaluateNote, renderOutline } from "./engine";
 import { parseTodos } from "./todoParser";
 
 const stubClient = (results: ClaudeResult[]): ClaudeClient => {
@@ -10,51 +10,32 @@ const stubClient = (results: ClaudeResult[]): ClaudeClient => {
   };
 };
 
-describe("subTodoCompletionRule", () => {
-  test("flags a checked parent with any unchecked descendant", () => {
-    const md = [
-      "- [x] parent",
-      "  - [ ] missing child",
-      "  - [x] done child",
-    ].join("\n");
+const recordingClient = (response: ClaudeResult): {
+  client: ClaudeClient;
+  prompts: string[];
+} => {
+  const prompts: string[] = [];
+  return {
+    prompts,
+    client: {
+      invoke: async (input) => {
+        prompts.push(input.prompt);
+        return response;
+      },
+    },
+  };
+};
 
-    const violations = subTodoCompletionRule(parseTodos(md));
-
-    expect(violations).toHaveLength(1);
-    expect(violations[0]).toMatchObject({
-      line: 1,
-      policyId: "sub-todos-complete",
-    });
-  });
-
-  test("passes when every descendant of a checked parent is checked", () => {
-    const md = [
-      "- [x] parent",
-      "  - [x] a",
-      "  - [x] b",
-    ].join("\n");
-
-    expect(subTodoCompletionRule(parseTodos(md))).toEqual([]);
-  });
-
-  test("ignores unchecked parents regardless of children state", () => {
-    const md = [
-      "- [ ] parent",
-      "  - [ ] still working",
-    ].join("\n");
-
-    expect(subTodoCompletionRule(parseTodos(md))).toEqual([]);
-  });
-
-  test("flags every checked ancestor of an unchecked leaf", () => {
-    const md = [
-      "- [x] grand",
-      "  - [x] mid",
-      "    - [ ] leaf",
-    ].join("\n");
-
-    const violations = subTodoCompletionRule(parseTodos(md));
-    expect(violations.map((v) => v.line).sort()).toEqual([1, 2]);
+describe("renderOutline", () => {
+  test("flattens the tree with indentation, line number, state, and text", () => {
+    const md = ["- [x] parent", "  - [ ] child", "- [ ] sibling"].join("\n");
+    expect(renderOutline(parseTodos(md))).toBe(
+      [
+        "- line 1 [x] parent",
+        "  - line 2 [ ] child",
+        "- line 3 [ ] sibling",
+      ].join("\n"),
+    );
   });
 });
 
@@ -63,29 +44,16 @@ describe("evaluateNote", () => {
     { id: "deliverable", prompt: "checked todos must reference a deliverable" },
   ];
 
-  test("returns built-in violations plus parsed LLM violations", async () => {
-    const md = "- [x] parent\n  - [ ] child\n- [x] no deliverable";
+  test("returns parsed LLM violations", async () => {
+    const md = "- [x] no deliverable";
     const claude = stubClient([
-      {
-        ok: true,
-        text: JSON.stringify([
-          { line: 3, reason: "no link or path" },
-        ]),
-      },
+      { ok: true, text: JSON.stringify([{ line: 1, reason: "no link" }]) },
     ]);
 
     const violations = await evaluateNote({ noteContent: md, policies, claude });
-
-    expect(violations).toContainEqual({
-      line: 1,
-      policyId: "sub-todos-complete",
-      reason: expect.any(String),
-    });
-    expect(violations).toContainEqual({
-      line: 3,
-      policyId: "deliverable",
-      reason: "no link or path",
-    });
+    expect(violations).toEqual([
+      { line: 1, policyId: "deliverable", reason: "no link" },
+    ]);
   });
 
   test("tolerates fenced JSON code blocks from claude", async () => {
@@ -101,24 +69,20 @@ describe("evaluateNote", () => {
     });
   });
 
-  test("returns no LLM violations when claude output is unparsable", async () => {
+  test("returns no violations when claude output is unparsable", async () => {
     const md = "- [x] thing";
     const claude = stubClient([{ ok: true, text: "I think there's no problem here." }]);
-
-    const violations = await evaluateNote({ noteContent: md, policies, claude });
-    expect(violations.filter((v) => v.policyId === "deliverable")).toEqual([]);
+    expect(await evaluateNote({ noteContent: md, policies, claude })).toEqual([]);
   });
 
-  test("returns no LLM violations when claude fails", async () => {
+  test("returns no violations when claude fails", async () => {
     const md = "- [x] thing";
     const claude = stubClient([{ ok: false, text: "", error: "boom" }]);
-
-    const violations = await evaluateNote({ noteContent: md, policies, claude });
-    expect(violations.filter((v) => v.policyId === "deliverable")).toEqual([]);
+    expect(await evaluateNote({ noteContent: md, policies, claude })).toEqual([]);
   });
 
-  test("skips claude entirely when there are no checked todos", async () => {
-    const md = "- [ ] not done\n- [ ] also not done";
+  test("skips claude entirely when the note has no todos", async () => {
+    const md = "just a paragraph\n# heading\n";
     let calls = 0;
     const claude: ClaudeClient = {
       invoke: async () => {
@@ -129,5 +93,54 @@ describe("evaluateNote", () => {
 
     await evaluateNote({ noteContent: md, policies, claude });
     expect(calls).toBe(0);
+  });
+
+  test("evaluates policies on notes with only unchecked todos", async () => {
+    const md = "- [ ] vague task";
+    const { client, prompts } = recordingClient({
+      ok: true,
+      text: JSON.stringify([{ line: 1, reason: "too vague" }]),
+    });
+
+    const violations = await evaluateNote({ noteContent: md, policies, claude: client });
+
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain("line 1 [ ] vague task");
+    expect(violations).toEqual([
+      { line: 1, policyId: "deliverable", reason: "too vague" },
+    ]);
+  });
+
+  test("includes the full todo outline (checked and unchecked) in the prompt", async () => {
+    const md = ["- [x] done", "  - [ ] still open", "- [ ] solo"].join("\n");
+    const { client, prompts } = recordingClient({ ok: true, text: "[]" });
+
+    await evaluateNote({ noteContent: md, policies, claude: client });
+
+    expect(prompts[0]).toContain("- line 1 [x] done");
+    expect(prompts[0]).toContain("  - line 2 [ ] still open");
+    expect(prompts[0]).toContain("- line 3 [ ] solo");
+  });
+
+  test("invokes claude once per policy in policies.md", async () => {
+    const md = "- [x] thing";
+    const twoPolicies = [
+      { id: "a", prompt: "policy a" },
+      { id: "b", prompt: "policy b" },
+    ];
+    const claude = stubClient([
+      { ok: true, text: "[]" },
+      { ok: true, text: JSON.stringify([{ line: 1, reason: "from b" }]) },
+    ]);
+
+    const violations = await evaluateNote({
+      noteContent: md,
+      policies: twoPolicies,
+      claude,
+    });
+
+    expect(violations).toEqual([
+      { line: 1, policyId: "b", reason: "from b" },
+    ]);
   });
 });

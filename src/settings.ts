@@ -4,17 +4,19 @@ import type PolicyEnforcerPlugin from "./main";
 export interface PolicyEnforcerSettings {
   claudeBinary: string;
   policiesFile: string;
-  scheduleTimes: string[];
+  pollIntervalSeconds: number;
   invocationTimeoutMs: number;
   dailyNotesFolder: string;
   includedFolders: string[];
   debugLogging: boolean;
 }
 
+export const MIN_POLL_SECONDS = 15;
+
 export const DEFAULT_SETTINGS: PolicyEnforcerSettings = {
   claudeBinary: "claude",
   policiesFile: "policies.md",
-  scheduleTimes: [],
+  pollIntervalSeconds: 60,
   invocationTimeoutMs: 120000,
   dailyNotesFolder: "",
   includedFolders: [],
@@ -55,23 +57,21 @@ export class PolicyEnforcerSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Schedule times")
+      .setName("Poll interval (seconds)")
       .setDesc(
-        "Comma-separated `HH:MM` times (24h) when a sweep should fire, e.g. " +
-          "`09:00, 13:00, 18:00`. Files whose mtime has not advanced since " +
-          "the last sweep are skipped. Leave empty to disable scheduled sweeps " +
-          "(manual commands still work).",
+        "Sweep in-scope notes this often. Files whose mtime has not advanced " +
+          `since the last sweep are skipped. Minimum ${MIN_POLL_SECONDS}s.`,
       )
       .addText((t) =>
         t
-          .setValue(this.plugin.settings.scheduleTimes.join(", "))
+          .setValue(String(this.plugin.settings.pollIntervalSeconds))
           .onChange(async (v) => {
-            this.plugin.settings.scheduleTimes = v
-              .split(",")
-              .map((s) => s.trim())
-              .filter((s) => s.length > 0);
-            await this.plugin.saveSettings();
-            this.plugin.restartPolling();
+            const n = Number(v);
+            if (Number.isFinite(n) && n >= MIN_POLL_SECONDS) {
+              this.plugin.settings.pollIntervalSeconds = Math.floor(n);
+              await this.plugin.saveSettings();
+              this.plugin.restartPolling();
+            }
           }),
       );
 

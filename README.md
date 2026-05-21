@@ -9,7 +9,7 @@ to Claude and writes back the rewritten content Claude returns.
 ## How it works
 
 ```
-at each scheduled HH:MM time (e.g. 09:00, 13:00, 18:00):
+every pollIntervalSeconds:
   for each .md file in (dailyNotesFolder ∪ includedFolders):
     if file mtime > last evaluated time:
       build one prompt with:
@@ -79,9 +79,9 @@ Obsidian runtime.
   - `wsl claude` — run claude inside WSL from Windows Obsidian
   - `wsl.exe -e claude` — same, but explicit
 - **Policies file** — path within the vault. Default `policies.md`.
-- **Schedule times** — comma-separated `HH:MM` times (24h) when a
-  sweep should fire, e.g. `09:00, 13:00, 18:00`. Leave empty to
-  disable scheduled sweeps; manual commands still work.
+- **Poll interval (seconds)** — how often the sweep runs. Default
+  `60`, minimum `15`. Files whose mtime has not advanced since the
+  last sweep are skipped, so most ticks are cheap.
 - **Claude timeout (ms)** — abort a single invocation after this
   long. Default `120000`.
 - **Daily notes folder** — folder containing `YYYY-MM-DD.md` files.

@@ -6,9 +6,9 @@ import {
 } from "./claudeClient";
 import { enforceNote, type EnforceContext } from "./engine";
 import { loadPolicies, type Policy } from "./policyLoader";
-import { nextFireTime } from "./schedule";
 import {
   DEFAULT_SETTINGS,
+  MIN_POLL_SECONDS,
   PolicyEnforcerSettingTab,
   type PolicyEnforcerSettings,
 } from "./settings";
@@ -68,7 +68,7 @@ export default class PolicyEnforcerPlugin extends Plugin {
 
   onunload(): void {
     if (this.pollHandle !== null) {
-      window.clearTimeout(this.pollHandle);
+      window.clearInterval(this.pollHandle);
       this.pollHandle = null;
     }
   }
@@ -83,24 +83,18 @@ export default class PolicyEnforcerPlugin extends Plugin {
 
   restartPolling(): void {
     if (this.pollHandle !== null) {
-      window.clearTimeout(this.pollHandle);
+      window.clearInterval(this.pollHandle);
       this.pollHandle = null;
     }
-    const next = nextFireTime(new Date(), this.settings.scheduleTimes);
-    if (next === null) {
-      console.warn(
-        `${LOG_TAG} no scheduled sweeps configured; only manual commands will fire`,
-      );
-      return;
-    }
-    const delay = Math.max(0, next.getTime() - Date.now());
-    console.info(
-      `${LOG_TAG} next sweep at ${next.toLocaleString()} (in ${Math.round(delay / 1000)}s)`,
+    const seconds = Math.max(
+      MIN_POLL_SECONDS,
+      this.settings.pollIntervalSeconds,
     );
-    this.pollHandle = window.setTimeout(() => {
-      this.pollHandle = null;
-      void this.pollTick().finally(() => this.restartPolling());
-    }, delay);
+    console.info(`${LOG_TAG} polling every ${seconds}s`);
+    this.pollHandle = window.setInterval(
+      () => void this.pollTick(),
+      seconds * 1000,
+    );
   }
 
   private async refreshPolicies(announce = false): Promise<void> {

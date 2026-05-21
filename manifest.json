@@ -1,0 +1,9 @@
+{
+  "id": "policy-enforcer",
+  "name": "Policy Enforcer",
+  "version": "0.1.0",
+  "minAppVersion": "1.4.0",
+  "description": "Enforces note policies (TODO deliverables, sub-todo completion, daily rollover) using the Claude CLI.",
+  "author": "Marina",
+  "isDesktopOnly": true
+}

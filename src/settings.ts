@@ -4,7 +4,7 @@ import type PolicyEnforcerPlugin from "./main";
 export interface PolicyEnforcerSettings {
   claudeBinary: string;
   policiesFile: string;
-  pollIntervalSeconds: number;
+  scheduleTimes: string[];
   invocationTimeoutMs: number;
   dailyNotesFolder: string;
   includedFolders: string[];
@@ -14,7 +14,7 @@ export interface PolicyEnforcerSettings {
 export const DEFAULT_SETTINGS: PolicyEnforcerSettings = {
   claudeBinary: "claude",
   policiesFile: "policies.md",
-  pollIntervalSeconds: 60,
+  scheduleTimes: [],
   invocationTimeoutMs: 120000,
   dailyNotesFolder: "",
   includedFolders: [],
@@ -55,22 +55,24 @@ export class PolicyEnforcerSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Poll interval (seconds)")
+      .setName("Schedule times")
       .setDesc(
-        "Check in-scope notes this often. Files whose mtime has not advanced " +
-          "since the last evaluation are skipped. Minimum 15s.",
+        "Comma-separated `HH:MM` times (24h) when a sweep should fire, e.g. " +
+          "`09:00, 13:00, 18:00`. Files whose mtime has not advanced since " +
+          "the last sweep are skipped. Leave empty to disable scheduled sweeps " +
+          "(manual commands still work).",
       )
       .addText((t) =>
-        t.setValue(String(this.plugin.settings.pollIntervalSeconds)).onChange(
-          async (v) => {
-            const n = Number(v);
-            if (Number.isFinite(n) && n >= 15) {
-              this.plugin.settings.pollIntervalSeconds = Math.floor(n);
-              await this.plugin.saveSettings();
-              this.plugin.restartPolling();
-            }
-          },
-        ),
+        t
+          .setValue(this.plugin.settings.scheduleTimes.join(", "))
+          .onChange(async (v) => {
+            this.plugin.settings.scheduleTimes = v
+              .split(",")
+              .map((s) => s.trim())
+              .filter((s) => s.length > 0);
+            await this.plugin.saveSettings();
+            this.plugin.restartPolling();
+          }),
       );
 
     new Setting(containerEl)

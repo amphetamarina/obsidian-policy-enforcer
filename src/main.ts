@@ -6,6 +6,7 @@ import {
 } from "./claudeClient";
 import { enforceNote, type EnforceContext } from "./engine";
 import { loadPolicies, type Policy } from "./policyLoader";
+import { nextFireTime } from "./schedule";
 import {
   DEFAULT_SETTINGS,
   PolicyEnforcerSettingTab,
@@ -13,7 +14,6 @@ import {
 } from "./settings";
 
 const DAILY_NOTE_NAME = /^(\d{4}-\d{2}-\d{2})$/;
-const MIN_POLL_SECONDS = 15;
 
 export default class PolicyEnforcerPlugin extends Plugin {
   settings!: PolicyEnforcerSettings;
@@ -65,7 +65,7 @@ export default class PolicyEnforcerPlugin extends Plugin {
 
   onunload(): void {
     if (this.pollHandle !== null) {
-      window.clearInterval(this.pollHandle);
+      window.clearTimeout(this.pollHandle);
       this.pollHandle = null;
     }
   }
@@ -80,11 +80,17 @@ export default class PolicyEnforcerPlugin extends Plugin {
 
   restartPolling(): void {
     if (this.pollHandle !== null) {
-      window.clearInterval(this.pollHandle);
+      window.clearTimeout(this.pollHandle);
       this.pollHandle = null;
     }
-    const seconds = Math.max(MIN_POLL_SECONDS, this.settings.pollIntervalSeconds);
-    this.pollHandle = window.setInterval(() => void this.pollTick(), seconds * 1000);
+    const next = nextFireTime(new Date(), this.settings.scheduleTimes);
+    if (next === null) return;
+
+    const delay = Math.max(0, next.getTime() - Date.now());
+    this.pollHandle = window.setTimeout(() => {
+      this.pollHandle = null;
+      void this.pollTick().finally(() => this.restartPolling());
+    }, delay);
   }
 
   private async refreshPolicies(announce = false): Promise<void> {

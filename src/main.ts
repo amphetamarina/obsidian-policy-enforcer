@@ -14,6 +14,7 @@ import {
 } from "./settings";
 
 const DAILY_NOTE_NAME = /^(\d{4}-\d{2}-\d{2})$/;
+const LOG_TAG = "[policy-enforcer]";
 
 export default class PolicyEnforcerPlugin extends Plugin {
   settings!: PolicyEnforcerSettings;
@@ -25,6 +26,8 @@ export default class PolicyEnforcerPlugin extends Plugin {
   async onload(): Promise<void> {
     await this.loadSettings();
     this.addSettingTab(new PolicyEnforcerSettingTab(this.app, this));
+
+    console.info(`${LOG_TAG} plugin loaded (debug=${this.settings.debugLogging})`);
 
     this.app.workspace.onLayoutReady(() => {
       void this.refreshPolicies();
@@ -45,7 +48,7 @@ export default class PolicyEnforcerPlugin extends Plugin {
       checkCallback: (checking) => {
         const file = this.app.workspace.getActiveFile();
         if (!file) return false;
-        if (!checking) void this.enforce(file);
+        if (!checking) void this.enforce(file, true);
         return true;
       },
     });
@@ -53,7 +56,7 @@ export default class PolicyEnforcerPlugin extends Plugin {
     this.addCommand({
       id: "policy-enforcer-poll-now",
       name: "Run polling sweep now",
-      callback: () => void this.pollTick(),
+      callback: () => void this.pollTick(true),
     });
 
     this.addCommand({
@@ -84,9 +87,16 @@ export default class PolicyEnforcerPlugin extends Plugin {
       this.pollHandle = null;
     }
     const next = nextFireTime(new Date(), this.settings.scheduleTimes);
-    if (next === null) return;
-
+    if (next === null) {
+      console.warn(
+        `${LOG_TAG} no scheduled sweeps configured; only manual commands will fire`,
+      );
+      return;
+    }
     const delay = Math.max(0, next.getTime() - Date.now());
+    console.info(
+      `${LOG_TAG} next sweep at ${next.toLocaleString()} (in ${Math.round(delay / 1000)}s)`,
+    );
     this.pollHandle = window.setTimeout(() => {
       this.pollHandle = null;
       void this.pollTick().finally(() => this.restartPolling());
@@ -98,11 +108,17 @@ export default class PolicyEnforcerPlugin extends Plugin {
     const file = this.app.vault.getAbstractFileByPath(path);
     if (!(file instanceof TFile)) {
       this.policies = [];
-      if (announce) new Notice(`Policy Enforcer: policies file not found at ${path}`);
+      console.warn(`${LOG_TAG} policies file not found at ${path}`);
+      if (announce) {
+        new Notice(`Policy Enforcer: policies file not found at ${path}`);
+      }
       return;
     }
     const content = await this.app.vault.read(file);
     this.policies = loadPolicies(content);
+    console.info(
+      `${LOG_TAG} loaded ${this.policies.length} policies from ${path}: ${this.policies.map((p) => p.id).join(", ") || "(none)"}`,
+    );
     if (announce) {
       new Notice(
         `Policy Enforcer: loaded ${this.policies.length} polic${
@@ -112,13 +128,33 @@ export default class PolicyEnforcerPlugin extends Plugin {
     }
   }
 
-  private async pollTick(): Promise<void> {
-    if (this.policies.length === 0) return;
-    for (const file of this.filesInScope()) {
-      const last = this.lastSeen.get(file.path) ?? 0;
-      if (file.stat.mtime <= last) continue;
-      await this.enforce(file);
+  private async pollTick(manual = false): Promise<void> {
+    if (this.policies.length === 0) {
+      console.warn(`${LOG_TAG} sweep skipped: no policies loaded`);
+      if (manual) new Notice("Policy Enforcer: no policies loaded.");
+      return;
     }
+    const files = this.filesInScope();
+    console.info(
+      `${LOG_TAG} sweep starting; ${files.length} file(s) in scope${manual ? " (manual)" : ""}`,
+    );
+    if (manual) {
+      new Notice(`Policy Enforcer: sweep starting (${files.length} files)`);
+    }
+
+    let processed = 0;
+    for (const file of files) {
+      const last = this.lastSeen.get(file.path) ?? 0;
+      if (file.stat.mtime <= last) {
+        console.info(`${LOG_TAG} skip ${file.path}: mtime unchanged since last sweep`);
+        continue;
+      }
+      processed++;
+      await this.enforce(file, false);
+    }
+    console.info(
+      `${LOG_TAG} sweep complete; processed ${processed}/${files.length}`,
+    );
   }
 
   private filesInScope(): TFile[] {
@@ -127,7 +163,12 @@ export default class PolicyEnforcerPlugin extends Plugin {
         (s) => s.length > 0,
       ),
     );
-    if (folders.size === 0) return [];
+    if (folders.size === 0) {
+      console.warn(
+        `${LOG_TAG} no folders in scope; set Daily notes folder or Included folders`,
+      );
+      return [];
+    }
 
     return this.app.vault.getMarkdownFiles().filter((f) => {
       if (f.path === this.settings.policiesFile) return false;
@@ -136,13 +177,20 @@ export default class PolicyEnforcerPlugin extends Plugin {
     });
   }
 
-  private async enforce(file: TFile): Promise<void> {
-    if (this.evaluating.has(file.path)) return;
+  private async enforce(file: TFile, manual: boolean): Promise<void> {
+    if (this.evaluating.has(file.path)) {
+      console.info(`${LOG_TAG} ${file.path}: already evaluating, skipping`);
+      return;
+    }
     this.evaluating.add(file.path);
+
+    const { binary, prefixArgs } = parseCommand(this.settings.claudeBinary);
+    console.info(
+      `${LOG_TAG} ${file.path}: enforcing with ${binary} ${[...prefixArgs, "-p"].join(" ")}`,
+    );
 
     try {
       const content = await this.app.vault.read(file);
-      const { binary, prefixArgs } = parseCommand(this.settings.claudeBinary);
       const claude = new CliClaudeClient(binary, prefixArgs);
       const context = await this.buildContext(file);
 
@@ -156,13 +204,10 @@ export default class PolicyEnforcerPlugin extends Plugin {
         logger: this.buildLogger(file.path),
       });
 
-      switch (outcome.kind) {
-        case "rewritten":
-          await this.app.vault.modify(file, outcome.content);
-          break;
-        case "error":
-          new Notice(`Policy Enforcer: ${outcome.error}`);
-          break;
+      this.reportOutcome(file.path, outcome, manual);
+
+      if (outcome.kind === "rewritten") {
+        await this.app.vault.modify(file, outcome.content);
       }
 
       const fresh = this.app.vault.getAbstractFileByPath(file.path);
@@ -171,9 +216,37 @@ export default class PolicyEnforcerPlugin extends Plugin {
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      new Notice(`Policy Enforcer: ${message}`);
+      console.error(`${LOG_TAG} ${file.path}: exception`, err);
+      new Notice(`Policy Enforcer: ${file.path} — exception: ${message}`);
     } finally {
       this.evaluating.delete(file.path);
+    }
+  }
+
+  private reportOutcome(
+    path: string,
+    outcome: Awaited<ReturnType<typeof enforceNote>>,
+    manual: boolean,
+  ): void {
+    switch (outcome.kind) {
+      case "rewritten":
+        console.info(`${LOG_TAG} ${path}: rewritten`);
+        new Notice(`Policy Enforcer: ${path} — rewritten`);
+        return;
+      case "unchanged":
+        console.info(`${LOG_TAG} ${path}: unchanged`);
+        if (manual) new Notice(`Policy Enforcer: ${path} — unchanged`);
+        return;
+      case "skipped":
+        console.info(`${LOG_TAG} ${path}: skipped (${outcome.reason})`);
+        if (manual) {
+          new Notice(`Policy Enforcer: ${path} — skipped (${outcome.reason})`);
+        }
+        return;
+      case "error":
+        console.error(`${LOG_TAG} ${path}: error: ${outcome.error}`);
+        new Notice(`Policy Enforcer: ${path} — error: ${outcome.error}`);
+        return;
     }
   }
 
@@ -202,18 +275,30 @@ export default class PolicyEnforcerPlugin extends Plugin {
     return siblings[0] ?? null;
   }
 
-  private buildLogger(notePath: string): ClaudeLogger | undefined {
-    if (!this.settings.debugLogging) return undefined;
+  private buildLogger(notePath: string): ClaudeLogger {
     return (event) => {
       if (event.kind === "request") {
-        console.log(
-          `[policy-enforcer] request note=${notePath} cmd=${event.command}\n--- prompt ---\n${event.prompt}\n--- end prompt ---`,
-        );
+        console.info(`${LOG_TAG} ${notePath}: spawning ${event.command}`);
+        if (this.settings.debugLogging) {
+          console.log(
+            `${LOG_TAG} ${notePath}: prompt (${event.prompt.length} chars)\n--- prompt ---\n${event.prompt}\n--- end prompt ---`,
+          );
+        }
       } else {
-        const status = event.ok ? "ok" : `error: ${event.error ?? "unknown"}`;
-        console.log(
-          `[policy-enforcer] response note=${notePath} ${status} duration=${event.durationMs}ms\n--- response ---\n${event.text}\n--- end response ---`,
-        );
+        if (event.ok) {
+          console.info(
+            `${LOG_TAG} ${notePath}: response ok in ${event.durationMs}ms (${event.text.length} chars)`,
+          );
+        } else {
+          console.error(
+            `${LOG_TAG} ${notePath}: response FAILED after ${event.durationMs}ms: ${event.error ?? "unknown"}`,
+          );
+        }
+        if (this.settings.debugLogging) {
+          console.log(
+            `${LOG_TAG} ${notePath}: response body\n--- response ---\n${event.text}\n--- end response ---`,
+          );
+        }
       }
     };
   }

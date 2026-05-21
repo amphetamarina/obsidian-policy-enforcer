@@ -10,7 +10,9 @@ to Claude and writes back the rewritten content Claude returns.
 
 ```
 every pollIntervalSeconds:
-  for each .md file in (dailyNotesFolder ∪ includedFolders):
+  scope = (latest YYYY-MM-DD.md in dailyNotesFolder) ∪
+          (every .md in includedFolders)
+  for each file in scope:
     if file mtime > last evaluated time:
       build one prompt with:
         - all policies from policies.md
@@ -85,8 +87,10 @@ Obsidian runtime.
 - **Claude timeout (ms)** — abort a single invocation after this
   long. Default `120000`.
 - **Daily notes folder** — folder containing `YYYY-MM-DD.md` files.
-  Files in this folder get the previous daily's content injected
-  into the policy prompt as context.
+  Only the file with the highest `YYYY-MM-DD` basename is swept;
+  older dailies are left alone so a back-fill or archive edit
+  never triggers a rewrite. The selected daily gets the previous
+  daily's content injected into the policy prompt as context.
 - **Included folders** — comma-separated additional folders to
   monitor. Leave empty to enforce only on daily notes.
 - **Debug logging** — log every prompt and response to the

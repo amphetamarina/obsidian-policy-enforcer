@@ -152,23 +152,36 @@ export default class PolicyEnforcerPlugin extends Plugin {
   }
 
   private filesInScope(): TFile[] {
-    const folders = new Set<string>(
-      [this.settings.dailyNotesFolder, ...this.settings.includedFolders].filter(
-        (s) => s.length > 0,
-      ),
+    const dailyFolder = this.settings.dailyNotesFolder;
+    const includedFolders = new Set(
+      this.settings.includedFolders.filter((s) => s.length > 0),
     );
-    if (folders.size === 0) {
+
+    if (!dailyFolder && includedFolders.size === 0) {
       console.warn(
         `${LOG_TAG} no folders in scope; set Daily notes folder or Included folders`,
       );
       return [];
     }
 
-    return this.app.vault.getMarkdownFiles().filter((f) => {
-      if (f.path === this.settings.policiesFile) return false;
+    const out: TFile[] = [];
+    let latestDaily: TFile | null = null;
+
+    for (const f of this.app.vault.getMarkdownFiles()) {
+      if (f.path === this.settings.policiesFile) continue;
       const parentPath = f.parent?.path ?? "";
-      return folders.has(parentPath);
-    });
+      if (dailyFolder && parentPath === dailyFolder) {
+        if (!DAILY_NOTE_NAME.test(f.basename)) continue;
+        if (latestDaily === null || f.basename > latestDaily.basename) {
+          latestDaily = f;
+        }
+        continue;
+      }
+      if (includedFolders.has(parentPath)) out.push(f);
+    }
+
+    if (latestDaily) out.push(latestDaily);
+    return out;
   }
 
   private async enforce(file: TFile, manual: boolean): Promise<void> {

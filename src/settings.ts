@@ -8,6 +8,7 @@ export interface PolicyEnforcerSettings {
   invocationTimeoutMs: number;
   enabledOnModify: boolean;
   enabledOnDailyCreate: boolean;
+  dailyNotesFolder: string;
   excludeFolders: string[];
 }
 
@@ -18,6 +19,7 @@ export const DEFAULT_SETTINGS: PolicyEnforcerSettings = {
   invocationTimeoutMs: 60000,
   enabledOnModify: true,
   enabledOnDailyCreate: true,
+  dailyNotesFolder: "",
   excludeFolders: [],
 };
 
@@ -87,6 +89,19 @@ export class PolicyEnforcerSettingTab extends PluginSettingTab {
       .addToggle((t) =>
         t.setValue(this.plugin.settings.enabledOnModify).onChange(async (v) => {
           this.plugin.settings.enabledOnModify = v;
+          await this.plugin.saveSettings();
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName("Daily notes folder")
+      .setDesc(
+        "Vault-relative folder containing daily notes (e.g. `daily`). " +
+          "Leave empty to treat any `YYYY-MM-DD.md` file as a daily note.",
+      )
+      .addText((t) =>
+        t.setValue(this.plugin.settings.dailyNotesFolder).onChange(async (v) => {
+          this.plugin.settings.dailyNotesFolder = v.trim().replace(/\/+$/, "");
           await this.plugin.saveSettings();
         }),
       );

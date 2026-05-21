@@ -105,6 +105,7 @@ export default class PolicyEnforcerPlugin extends Plugin {
 
     const match = DAILY_NOTE_NAME.exec(file.basename);
     if (!match) return;
+    if (!this.isInDailyFolder(file)) return;
 
     const previous = this.findPreviousDaily(file, match[1]);
     if (!previous) return;
@@ -120,6 +121,13 @@ export default class PolicyEnforcerPlugin extends Plugin {
     } finally {
       this.evaluating.delete(file.path);
     }
+  }
+
+  private isInDailyFolder(file: TFile): boolean {
+    const configured = this.settings.dailyNotesFolder;
+    if (configured.length === 0) return true;
+    const parentPath = file.parent?.path ?? "";
+    return parentPath === configured;
   }
 
   private findPreviousDaily(current: TFile, currentDate: string): TFile | null {

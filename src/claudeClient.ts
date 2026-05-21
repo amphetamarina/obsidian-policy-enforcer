@@ -16,12 +16,22 @@ export interface ClaudeClient {
   invoke(input: ClaudeInvocation): Promise<ClaudeResult>;
 }
 
+export function parseCommand(command: string): { binary: string; prefixArgs: string[] } {
+  const tokens = command.trim().split(/\s+/).filter((t) => t.length > 0);
+  if (tokens.length === 0) return { binary: "claude", prefixArgs: [] };
+  const [binary, ...prefixArgs] = tokens;
+  return { binary, prefixArgs };
+}
+
 export class CliClaudeClient implements ClaudeClient {
-  constructor(private readonly binary: string = "claude") {}
+  constructor(
+    private readonly binary: string = "claude",
+    private readonly prefixArgs: string[] = [],
+  ) {}
 
   invoke(input: ClaudeInvocation): Promise<ClaudeResult> {
     return new Promise((resolve) => {
-      const child = spawn(this.binary, ["-p"], {
+      const child = spawn(this.binary, [...this.prefixArgs, "-p"], {
         cwd: input.cwd,
         stdio: ["pipe", "pipe", "pipe"],
       });

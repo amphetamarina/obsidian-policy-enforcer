@@ -32,7 +32,11 @@ export class PolicyEnforcerSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Claude binary")
-      .setDesc("Path or name of the claude CLI. Must be on PATH or absolute.")
+      .setDesc(
+        "Command used to launch the claude CLI. Whitespace-split: the first " +
+          "token is the binary, the rest are leading args before `-p`. " +
+          "Examples: `claude`, `wsl claude`, `wsl.exe -e claude`.",
+      )
       .addText((t) =>
         t.setValue(this.plugin.settings.claudeBinary).onChange(async (v) => {
           this.plugin.settings.claudeBinary = v.trim() || "claude";

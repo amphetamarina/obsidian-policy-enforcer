@@ -1,5 +1,5 @@
 import { Notice, Plugin, TAbstractFile, TFile } from "obsidian";
-import { CliClaudeClient } from "./claudeClient";
+import { CliClaudeClient, parseCommand } from "./claudeClient";
 import { evaluateNote } from "./engine";
 import { applyViolations } from "./enforcer";
 import { loadPolicies, type Policy } from "./policyLoader";
@@ -140,7 +140,8 @@ export default class PolicyEnforcerPlugin extends Plugin {
 
     try {
       const content = await this.app.vault.read(file);
-      const claude = new CliClaudeClient(this.settings.claudeBinary);
+      const { binary, prefixArgs } = parseCommand(this.settings.claudeBinary);
+      const claude = new CliClaudeClient(binary, prefixArgs);
       const violations = await evaluateNote({
         noteContent: content,
         policies: this.policies,

@@ -78,8 +78,16 @@ See `policies.example.md` in this repo.
 
 ## Settings
 
-- **Claude binary** — path or name of the `claude` CLI. Defaults to
-  `claude` (resolved on PATH).
+- **Claude binary** — command used to launch the `claude` CLI. The
+  field is whitespace-split: the first token is the binary, the rest
+  are leading args before `-p`. Examples:
+  - `claude` (default, resolved on PATH)
+  - `/usr/local/bin/claude` (absolute path)
+  - `wsl claude` — run claude inside WSL from Windows Obsidian
+  - `wsl.exe -e claude` — same, but explicit
+  - If your binary path contains spaces, wrap it in a `.bat`/`.sh`
+    shim and point this setting at the shim; the field does not
+    parse shell quoting.
 - **Policies file** — path within the vault. Defaults to
   `policies.md`.
 - **Debounce (ms)** — how long to wait after the last edit before

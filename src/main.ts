@@ -1,5 +1,5 @@
 import { Notice, Plugin, TAbstractFile, TFile } from "obsidian";
-import { CliClaudeClient, parseCommand } from "./claudeClient";
+import { CliClaudeClient, parseCommand, type ClaudeLogger } from "./claudeClient";
 import { evaluateNote } from "./engine";
 import { applyViolations } from "./enforcer";
 import { loadPolicies, type Policy } from "./policyLoader";
@@ -155,6 +155,7 @@ export default class PolicyEnforcerPlugin extends Plugin {
         policies: this.policies,
         claude,
         timeoutMs: this.settings.invocationTimeoutMs,
+        logger: this.buildLogger(file.path),
       });
 
       const next = applyViolations(content, violations);
@@ -167,6 +168,22 @@ export default class PolicyEnforcerPlugin extends Plugin {
     } finally {
       this.evaluating.delete(file.path);
     }
+  }
+
+  private buildLogger(notePath: string): ClaudeLogger | undefined {
+    if (!this.settings.debugLogging) return undefined;
+    return (event) => {
+      if (event.kind === "request") {
+        console.log(
+          `[policy-enforcer] request note=${notePath} cmd=${event.command}\n--- prompt ---\n${event.prompt}\n--- end prompt ---`,
+        );
+      } else {
+        const status = event.ok ? "ok" : `error: ${event.error ?? "unknown"}`;
+        console.log(
+          `[policy-enforcer] response note=${notePath} ${status} duration=${event.durationMs}ms\n--- response ---\n${event.text}\n--- end response ---`,
+        );
+      }
+    };
   }
 
   private isExcluded(path: string): boolean {

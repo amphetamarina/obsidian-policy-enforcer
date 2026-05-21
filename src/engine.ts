@@ -1,4 +1,4 @@
-import type { ClaudeClient } from "./claudeClient";
+import type { ClaudeClient, ClaudeLogger } from "./claudeClient";
 import type { Policy } from "./policyLoader";
 import { parseTodos, type TodoNode } from "./todoParser";
 
@@ -13,6 +13,7 @@ export interface EvaluateInput {
   policies: Policy[];
   claude: ClaudeClient;
   timeoutMs?: number;
+  logger?: ClaudeLogger;
 }
 
 export async function evaluateNote(input: EvaluateInput): Promise<Violation[]> {
@@ -24,7 +25,11 @@ export async function evaluateNote(input: EvaluateInput): Promise<Violation[]> {
 
   for (const policy of input.policies) {
     const prompt = buildPrompt(policy, input.noteContent, outline);
-    const result = await input.claude.invoke({ prompt, timeoutMs: input.timeoutMs });
+    const result = await input.claude.invoke({
+      prompt,
+      timeoutMs: input.timeoutMs,
+      logger: input.logger,
+    });
     if (!result.ok) continue;
 
     const parsed = parseClaudeJson(result.text);

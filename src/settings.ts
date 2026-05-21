@@ -10,6 +10,7 @@ export interface PolicyEnforcerSettings {
   enabledOnDailyCreate: boolean;
   dailyNotesFolder: string;
   excludeFolders: string[];
+  debugLogging: boolean;
 }
 
 export const DEFAULT_SETTINGS: PolicyEnforcerSettings = {
@@ -21,6 +22,7 @@ export const DEFAULT_SETTINGS: PolicyEnforcerSettings = {
   enabledOnDailyCreate: true,
   dailyNotesFolder: "",
   excludeFolders: [],
+  debugLogging: false,
 };
 
 export class PolicyEnforcerSettingTab extends PluginSettingTab {
@@ -115,6 +117,19 @@ export class PolicyEnforcerSettingTab extends PluginSettingTab {
             this.plugin.settings.enabledOnDailyCreate = v;
             await this.plugin.saveSettings();
           }),
+      );
+
+    new Setting(containerEl)
+      .setName("Debug logging")
+      .setDesc(
+        "Log every claude invocation (prompt + raw response) to the developer console. " +
+          "Open with Ctrl+Shift+I. Keep off in normal use; the prompts are large.",
+      )
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.debugLogging).onChange(async (v) => {
+          this.plugin.settings.debugLogging = v;
+          await this.plugin.saveSettings();
+        }),
       );
 
     new Setting(containerEl)

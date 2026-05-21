@@ -1,9 +1,16 @@
 import { spawn } from "child_process";
 
+export type ClaudeLogger = (event: ClaudeLogEvent) => void;
+
+export type ClaudeLogEvent =
+  | { kind: "request"; command: string; prompt: string }
+  | { kind: "response"; ok: boolean; durationMs: number; text: string; error?: string };
+
 export interface ClaudeInvocation {
   prompt: string;
   cwd?: string;
   timeoutMs?: number;
+  logger?: ClaudeLogger;
 }
 
 export interface ClaudeResult {
@@ -31,7 +38,15 @@ export class CliClaudeClient implements ClaudeClient {
 
   invoke(input: ClaudeInvocation): Promise<ClaudeResult> {
     return new Promise((resolve) => {
-      const child = spawn(this.binary, [...this.prefixArgs, "-p"], {
+      const args = [...this.prefixArgs, "-p"];
+      const startedAt = Date.now();
+      input.logger?.({
+        kind: "request",
+        command: [this.binary, ...args].join(" "),
+        prompt: input.prompt,
+      });
+
+      const child = spawn(this.binary, args, {
         cwd: input.cwd,
         stdio: ["pipe", "pipe", "pipe"],
       });
@@ -45,6 +60,13 @@ export class CliClaudeClient implements ClaudeClient {
         if (resolved) return;
         resolved = true;
         if (timer) clearTimeout(timer);
+        input.logger?.({
+          kind: "response",
+          ok: result.ok,
+          durationMs: Date.now() - startedAt,
+          text: result.text,
+          error: result.error,
+        });
         resolve(result);
       };
 

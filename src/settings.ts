@@ -4,24 +4,20 @@ import type PolicyEnforcerPlugin from "./main";
 export interface PolicyEnforcerSettings {
   claudeBinary: string;
   policiesFile: string;
-  debounceMs: number;
+  pollIntervalSeconds: number;
   invocationTimeoutMs: number;
-  enabledOnModify: boolean;
-  enabledOnDailyCreate: boolean;
   dailyNotesFolder: string;
-  excludeFolders: string[];
+  includedFolders: string[];
   debugLogging: boolean;
 }
 
 export const DEFAULT_SETTINGS: PolicyEnforcerSettings = {
   claudeBinary: "claude",
   policiesFile: "policies.md",
-  debounceMs: 3000,
-  invocationTimeoutMs: 60000,
-  enabledOnModify: true,
-  enabledOnDailyCreate: true,
+  pollIntervalSeconds: 60,
+  invocationTimeoutMs: 120000,
   dailyNotesFolder: "",
-  excludeFolders: [],
+  includedFolders: [],
   debugLogging: false,
 };
 
@@ -59,16 +55,22 @@ export class PolicyEnforcerSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Debounce (ms)")
-      .setDesc("Wait this long after the last edit before evaluating.")
+      .setName("Poll interval (seconds)")
+      .setDesc(
+        "Check in-scope notes this often. Files whose mtime has not advanced " +
+          "since the last evaluation are skipped. Minimum 15s.",
+      )
       .addText((t) =>
-        t.setValue(String(this.plugin.settings.debounceMs)).onChange(async (v) => {
-          const n = Number(v);
-          if (Number.isFinite(n) && n >= 0) {
-            this.plugin.settings.debounceMs = n;
-            await this.plugin.saveSettings();
-          }
-        }),
+        t.setValue(String(this.plugin.settings.pollIntervalSeconds)).onChange(
+          async (v) => {
+            const n = Number(v);
+            if (Number.isFinite(n) && n >= 15) {
+              this.plugin.settings.pollIntervalSeconds = Math.floor(n);
+              await this.plugin.saveSettings();
+              this.plugin.restartPolling();
+            }
+          },
+        ),
       );
 
     new Setting(containerEl)
@@ -87,19 +89,11 @@ export class PolicyEnforcerSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Run on note modify")
-      .addToggle((t) =>
-        t.setValue(this.plugin.settings.enabledOnModify).onChange(async (v) => {
-          this.plugin.settings.enabledOnModify = v;
-          await this.plugin.saveSettings();
-        }),
-      );
-
-    new Setting(containerEl)
       .setName("Daily notes folder")
       .setDesc(
         "Vault-relative folder containing daily notes (e.g. `daily`). " +
-          "Leave empty to treat any `YYYY-MM-DD.md` file as a daily note.",
+          "Files in this folder named `YYYY-MM-DD.md` get the previous " +
+          "daily's content injected into the policy prompt as context.",
       )
       .addText((t) =>
         t.setValue(this.plugin.settings.dailyNotesFolder).onChange(async (v) => {
@@ -109,12 +103,19 @@ export class PolicyEnforcerSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Run rollover on daily-note create")
-      .addToggle((t) =>
+      .setName("Included folders")
+      .setDesc(
+        "Comma-separated folders (besides the daily folder) that the enforcer " +
+          "should monitor. Leave empty to only enforce on daily notes.",
+      )
+      .addText((t) =>
         t
-          .setValue(this.plugin.settings.enabledOnDailyCreate)
+          .setValue(this.plugin.settings.includedFolders.join(", "))
           .onChange(async (v) => {
-            this.plugin.settings.enabledOnDailyCreate = v;
+            this.plugin.settings.includedFolders = v
+              .split(",")
+              .map((s) => s.trim().replace(/\/+$/, ""))
+              .filter((s) => s.length > 0);
             await this.plugin.saveSettings();
           }),
       );
@@ -122,29 +123,14 @@ export class PolicyEnforcerSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Debug logging")
       .setDesc(
-        "Log every claude invocation (prompt + raw response) to the developer console. " +
-          "Open with Ctrl+Shift+I. Keep off in normal use; the prompts are large.",
+        "Log every claude invocation (prompt + raw response) to the developer " +
+          "console. Open with Ctrl+Shift+I.",
       )
       .addToggle((t) =>
         t.setValue(this.plugin.settings.debugLogging).onChange(async (v) => {
           this.plugin.settings.debugLogging = v;
           await this.plugin.saveSettings();
         }),
-      );
-
-    new Setting(containerEl)
-      .setName("Exclude folders")
-      .setDesc("Comma-separated folder paths to skip.")
-      .addText((t) =>
-        t
-          .setValue(this.plugin.settings.excludeFolders.join(", "))
-          .onChange(async (v) => {
-            this.plugin.settings.excludeFolders = v
-              .split(",")
-              .map((s) => s.trim())
-              .filter((s) => s.length > 0);
-            await this.plugin.saveSettings();
-          }),
       );
   }
 }

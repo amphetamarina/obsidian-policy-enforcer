@@ -2,47 +2,31 @@
 
 An Obsidian plugin that enforces note policies by shelling out to the
 [Claude CLI](https://docs.claude.com/en/docs/claude-code/overview)
-(`claude -p`). Policies are written in plain markdown in a file at the
-vault root; the plugin sends each policy plus the current note to
-Claude and applies the resulting violations to the note.
-
-## Status
-
-Early. The first shipped policy set covers TODO discipline:
-
-1. A checked TODO must reference a verifiable deliverable (link, file,
-   directory, image — anything Claude can read or infer).
-2. Every TODO must be descriptive enough to be a real task. Broad
-   TODOs should be broken down.
-3. A TODO with sub-TODOs is complete only when every sub-TODO is
-   complete with its own deliverable.
-4. When a new daily note is created, every incomplete TODO from the
-   most recent prior daily note is carried over under `## Carried over`.
-
-Policies 1–3 are defined in `policies.md` and run on every note save
-(debounced). Each policy is sent to Claude as plain prose; the plugin
-itself has no hardcoded rules, so you can edit, replace, or add to
-them freely. Policy 4 is daily-note infrastructure and runs once
-when a new `YYYY-MM-DD.md` file is created.
+(`claude -p`). Policies are written in plain markdown in a file at
+the vault root; the plugin sends every policy plus the current note
+to Claude and writes back the rewritten content Claude returns.
 
 ## How it works
 
 ```
-note edit
-  -> debounce
-  -> parse TODOs into an outline                     (pure)
-  -> for each policy in policies.md:
-       send prompt with outline + note to `claude -p`  (subprocess)
-       parse JSON array of {line, reason}              (pure)
-  -> revert flagged [x] to [ ] and append
-       <!-- policy:<id>: <reason> --> on each line   (pure)
-  -> write back to the vault if anything changed
+every N seconds (default 60):
+  for each .md file in (dailyNotesFolder ∪ includedFolders):
+    if file mtime > last evaluated time:
+      build one prompt with:
+        - all policies from policies.md
+        - (if file is a daily note) yesterday's daily content
+        - the current note inside a ```markdown fence
+      send to `claude -p` via stdin
+      extract the rewritten note from the response fence
+      if it differs from current content, write it back
+      record the new mtime so the next sweep skips this file
 ```
 
-When the agent flags a checked TODO, the plugin reverts the checkbox
-to `[ ]` and appends an inline HTML comment with the policy id and
-reason. The next save re-evaluates with the latest content, so once
-you address the issue the comment disappears automatically.
+The plugin owns no rules. Every behaviour — TODO discipline,
+deliverable enforcement, daily rollover, formatting cleanup — is
+expressed as prose in `policies.md`. Want to add a new rule? Add a
+new `# Policy: <id>` section. Want to disable one? Delete the
+section.
 
 ## Setup
 
@@ -59,53 +43,62 @@ you address the issue the comment disappears automatically.
    `<your-vault>/.obsidian/plugins/policy-enforcer/`.
 4. Enable the plugin in Obsidian's community-plugins settings.
 5. Make sure the `claude` CLI is installed and on your PATH (or set
-   an absolute path in the plugin settings).
-6. Create `policies.md` at the vault root (see the example below).
+   an absolute path / `wsl claude` in the plugin settings).
+6. Copy `policies.example.md` to `<your-vault>/policies.md` and
+   edit to taste.
+7. In plugin settings, set **Daily notes folder** (e.g. `daily`)
+   and any **Included folders**.
 
 ## Development
 
-- `bun test` — run the unit-test suite (parser, policy loader, engine,
-  enforcer, rollover).
+- `bun test` — run the unit-test suite (policy loader, engine).
 - `bun run dev` — esbuild in watch mode.
 - `bun run build` — typecheck and produce `main.js`.
 
-The codebase deliberately keeps Obsidian-aware code in
-`src/main.ts` and `src/settings.ts` only; every other module is a
-pure function so policies can be reasoned about and tested without
-the Obsidian runtime.
+Obsidian-aware code lives in `src/main.ts` and `src/settings.ts`
+only. The engine, policy loader, and Claude client are pure
+modules so policies and prompt-building can be tested without the
+Obsidian runtime.
 
-## Example `policies.md`
+## Commands
 
-See `policies.example.md` in this repo.
+- **Enforce active note now** — run the policies on the active
+  note immediately, bypassing the poll interval.
+- **Run polling sweep now** — process every in-scope note whose
+  mtime has advanced since the last sweep.
+- **Reload policies file** — re-read `policies.md` (also happens
+  automatically when you edit and save the file).
 
 ## Settings
 
 - **Claude binary** — command used to launch the `claude` CLI. The
-  field is whitespace-split: the first token is the binary, the rest
-  are leading args before `-p`. Examples:
+  field is whitespace-split: the first token is the binary, the
+  rest are leading args before `-p`. Examples:
   - `claude` (default, resolved on PATH)
   - `/usr/local/bin/claude` (absolute path)
   - `wsl claude` — run claude inside WSL from Windows Obsidian
   - `wsl.exe -e claude` — same, but explicit
-  - If your binary path contains spaces, wrap it in a `.bat`/`.sh`
-    shim and point this setting at the shim; the field does not
-    parse shell quoting.
-- **Policies file** — path within the vault. Defaults to
-  `policies.md`.
-- **Debounce (ms)** — how long to wait after the last edit before
-  evaluating. Default `3000`.
+- **Policies file** — path within the vault. Default `policies.md`.
+- **Poll interval (seconds)** — how often to sweep. Default `60`,
+  minimum `15` (enforced).
 - **Claude timeout (ms)** — abort a single invocation after this
-  long. Default `60000`.
-- **Run on note modify** — toggle the on-save policy check.
-- **Run rollover on daily-note create** — toggle the daily rollover.
-- **Exclude folders** — comma-separated folder paths to skip.
+  long. Default `120000`.
+- **Daily notes folder** — folder containing `YYYY-MM-DD.md` files.
+  Files in this folder get the previous daily's content injected
+  into the policy prompt as context.
+- **Included folders** — comma-separated additional folders to
+  monitor. Leave empty to enforce only on daily notes.
+- **Debug logging** — log every prompt and response to the
+  devtools console (`Ctrl+Shift+I`).
 
 ## Caveats
 
-- Desktop only. The plugin shells out to a subprocess, which is not
-  available on Obsidian mobile.
-- Every on-save evaluation consumes Claude API credits via the CLI.
-  Use the debounce and folder-exclude settings to keep usage in
-  check.
-- The LLM occasionally returns line numbers that do not exist; those
-  violations are dropped silently.
+- Desktop only. The plugin shells out to a subprocess, which is
+  not available on Obsidian mobile.
+- Every poll consumes Claude credits / Max subscription usage.
+  Use `pollIntervalSeconds`, `includedFolders`, and unsubscribing
+  unneeded policies to keep usage in check.
+- Claude rewrites the entire note. Trust depends on your policies
+  being clear; vague prose ("make this better") will produce
+  unpredictable rewrites. Always commit your vault to git so you
+  can recover unintended changes.

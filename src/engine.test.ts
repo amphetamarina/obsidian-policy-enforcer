@@ -1,146 +1,164 @@
 import { describe, expect, test } from "bun:test";
 import type { ClaudeClient, ClaudeResult } from "./claudeClient";
-import { evaluateNote, renderOutline } from "./engine";
-import { parseTodos } from "./todoParser";
+import { enforceNote, extractMarkdown } from "./engine";
 
-const stubClient = (results: ClaudeResult[]): ClaudeClient => {
-  let i = 0;
-  return {
-    invoke: async () => results[i++] ?? { ok: false, text: "", error: "stub exhausted" },
-  };
-};
+const stubClient = (result: ClaudeResult): ClaudeClient => ({
+  invoke: async () => result,
+});
 
-const recordingClient = (response: ClaudeResult): {
-  client: ClaudeClient;
-  prompts: string[];
-} => {
+const recordingClient = (
+  result: ClaudeResult,
+): { client: ClaudeClient; prompts: string[] } => {
   const prompts: string[] = [];
   return {
     prompts,
-    client: {
-      invoke: async (input) => {
-        prompts.push(input.prompt);
-        return response;
-      },
-    },
+    client: { invoke: async (i) => (prompts.push(i.prompt), result) },
   };
 };
 
-describe("renderOutline", () => {
-  test("flattens the tree with indentation, line number, state, and text", () => {
-    const md = ["- [x] parent", "  - [ ] child", "- [ ] sibling"].join("\n");
-    expect(renderOutline(parseTodos(md))).toBe(
-      [
-        "- line 1 [x] parent",
-        "  - line 2 [ ] child",
-        "- line 3 [ ] sibling",
-      ].join("\n"),
-    );
+const policies = [{ id: "p1", prompt: "do thing" }];
+
+describe("extractMarkdown", () => {
+  test("returns null on empty/whitespace input", () => {
+    expect(extractMarkdown("")).toBeNull();
+    expect(extractMarkdown("   \n\n")).toBeNull();
+  });
+
+  test("extracts content from a ```markdown fence", () => {
+    const text = "preamble\n```markdown\nhello\nworld\n```\n";
+    expect(extractMarkdown(text)).toBe("hello\nworld");
+  });
+
+  test("accepts ```md as an alias", () => {
+    expect(extractMarkdown("```md\nhi\n```")).toBe("hi");
+  });
+
+  test("accepts an unlabelled fence", () => {
+    expect(extractMarkdown("```\nhi\n```")).toBe("hi");
+  });
+
+  test("falls back to the trimmed raw text when no fence is present", () => {
+    expect(extractMarkdown("just words")).toBe("just words");
   });
 });
 
-describe("evaluateNote", () => {
-  const policies = [
-    { id: "deliverable", prompt: "checked todos must reference a deliverable" },
-  ];
-
-  test("returns parsed LLM violations", async () => {
-    const md = "- [x] no deliverable";
-    const claude = stubClient([
-      { ok: true, text: JSON.stringify([{ line: 1, reason: "no link" }]) },
-    ]);
-
-    const violations = await evaluateNote({ noteContent: md, policies, claude });
-    expect(violations).toEqual([
-      { line: 1, policyId: "deliverable", reason: "no link" },
-    ]);
-  });
-
-  test("tolerates fenced JSON code blocks from claude", async () => {
-    const md = "- [x] thing";
-    const text = "```json\n[{\"line\": 1, \"reason\": \"missing\"}]\n```";
-    const claude = stubClient([{ ok: true, text }]);
-
-    const violations = await evaluateNote({ noteContent: md, policies, claude });
-    expect(violations).toContainEqual({
-      line: 1,
-      policyId: "deliverable",
-      reason: "missing",
+describe("enforceNote", () => {
+  test("skips when no policies are loaded", async () => {
+    const result = await enforceNote({
+      noteContent: "x",
+      notePath: "n.md",
+      policies: [],
+      claude: stubClient({ ok: true, text: "[]" }),
     });
+    expect(result).toEqual({ kind: "skipped", reason: "no policies loaded" });
   });
 
-  test("returns no violations when claude output is unparsable", async () => {
-    const md = "- [x] thing";
-    const claude = stubClient([{ ok: true, text: "I think there's no problem here." }]);
-    expect(await evaluateNote({ noteContent: md, policies, claude })).toEqual([]);
-  });
-
-  test("returns no violations when claude fails", async () => {
-    const md = "- [x] thing";
-    const claude = stubClient([{ ok: false, text: "", error: "boom" }]);
-    expect(await evaluateNote({ noteContent: md, policies, claude })).toEqual([]);
-  });
-
-  test("skips claude entirely when the note has no todos", async () => {
-    const md = "just a paragraph\n# heading\n";
-    let calls = 0;
-    const claude: ClaudeClient = {
-      invoke: async () => {
-        calls++;
-        return { ok: true, text: "[]" };
-      },
-    };
-
-    await evaluateNote({ noteContent: md, policies, claude });
-    expect(calls).toBe(0);
-  });
-
-  test("evaluates policies on notes with only unchecked todos", async () => {
-    const md = "- [ ] vague task";
-    const { client, prompts } = recordingClient({
+  test("returns rewritten content when claude returns a different note", async () => {
+    const claude = stubClient({
       ok: true,
-      text: JSON.stringify([{ line: 1, reason: "too vague" }]),
+      text: "```markdown\nNew body\n```",
     });
-
-    const violations = await evaluateNote({ noteContent: md, policies, claude: client });
-
-    expect(prompts).toHaveLength(1);
-    expect(prompts[0]).toContain("line 1 [ ] vague task");
-    expect(violations).toEqual([
-      { line: 1, policyId: "deliverable", reason: "too vague" },
-    ]);
-  });
-
-  test("includes the full todo outline (checked and unchecked) in the prompt", async () => {
-    const md = ["- [x] done", "  - [ ] still open", "- [ ] solo"].join("\n");
-    const { client, prompts } = recordingClient({ ok: true, text: "[]" });
-
-    await evaluateNote({ noteContent: md, policies, claude: client });
-
-    expect(prompts[0]).toContain("- line 1 [x] done");
-    expect(prompts[0]).toContain("  - line 2 [ ] still open");
-    expect(prompts[0]).toContain("- line 3 [ ] solo");
-  });
-
-  test("invokes claude once per policy in policies.md", async () => {
-    const md = "- [x] thing";
-    const twoPolicies = [
-      { id: "a", prompt: "policy a" },
-      { id: "b", prompt: "policy b" },
-    ];
-    const claude = stubClient([
-      { ok: true, text: "[]" },
-      { ok: true, text: JSON.stringify([{ line: 1, reason: "from b" }]) },
-    ]);
-
-    const violations = await evaluateNote({
-      noteContent: md,
-      policies: twoPolicies,
+    const result = await enforceNote({
+      noteContent: "Old body",
+      notePath: "n.md",
+      policies,
       claude,
     });
+    expect(result).toEqual({ kind: "rewritten", content: "New body" });
+  });
 
-    expect(violations).toEqual([
-      { line: 1, policyId: "b", reason: "from b" },
-    ]);
+  test("returns unchanged when claude returns the same content", async () => {
+    const claude = stubClient({
+      ok: true,
+      text: "```markdown\nSame\n```",
+    });
+    const result = await enforceNote({
+      noteContent: "Same",
+      notePath: "n.md",
+      policies,
+      claude,
+    });
+    expect(result).toEqual({ kind: "unchanged" });
+  });
+
+  test("returns error when claude fails", async () => {
+    const result = await enforceNote({
+      noteContent: "x",
+      notePath: "n.md",
+      policies,
+      claude: stubClient({ ok: false, text: "", error: "boom" }),
+    });
+    expect(result).toEqual({ kind: "error", error: "boom" });
+  });
+
+  test("returns error when claude returns empty text", async () => {
+    const result = await enforceNote({
+      noteContent: "x",
+      notePath: "n.md",
+      policies,
+      claude: stubClient({ ok: true, text: "" }),
+    });
+    expect(result.kind).toBe("error");
+  });
+
+  test("prompt includes every policy id and body", async () => {
+    const { client, prompts } = recordingClient({
+      ok: true,
+      text: "```markdown\nx\n```",
+    });
+    await enforceNote({
+      noteContent: "x",
+      notePath: "today.md",
+      policies: [
+        { id: "alpha", prompt: "be alpha" },
+        { id: "beta", prompt: "be beta" },
+      ],
+      claude: client,
+    });
+    expect(prompts[0]).toContain("alpha");
+    expect(prompts[0]).toContain("be alpha");
+    expect(prompts[0]).toContain("beta");
+    expect(prompts[0]).toContain("be beta");
+    expect(prompts[0]).toContain("today.md");
+    expect(prompts[0]).toContain("```markdown\nx\n```");
+  });
+
+  test("prompt includes previous-daily context when provided", async () => {
+    const { client, prompts } = recordingClient({
+      ok: true,
+      text: "```markdown\nx\n```",
+    });
+    await enforceNote({
+      noteContent: "today body",
+      notePath: "daily/2026-05-21.md",
+      policies,
+      claude: client,
+      context: {
+        previousDaily: {
+          path: "daily/2026-05-20.md",
+          content: "yesterday body",
+        },
+      },
+    });
+    expect(prompts[0]).toContain("daily/2026-05-20.md");
+    expect(prompts[0]).toContain("yesterday body");
+  });
+
+  test("forwards the logger to the claude invocation", async () => {
+    const seen: string[] = [];
+    const claude: ClaudeClient = {
+      invoke: async (i) => {
+        i.logger?.({ kind: "request", command: "x", prompt: i.prompt });
+        return { ok: true, text: "```markdown\nout\n```" };
+      },
+    };
+    await enforceNote({
+      noteContent: "in",
+      notePath: "n.md",
+      policies,
+      claude,
+      logger: (e) => seen.push(e.kind),
+    });
+    expect(seen).toEqual(["request"]);
   });
 });

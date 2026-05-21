@@ -1,9 +1,11 @@
-import { Notice, Plugin, TAbstractFile, TFile } from "obsidian";
-import { CliClaudeClient, parseCommand, type ClaudeLogger } from "./claudeClient";
-import { evaluateNote } from "./engine";
-import { applyViolations } from "./enforcer";
+import { Notice, Plugin, TFile } from "obsidian";
+import {
+  CliClaudeClient,
+  parseCommand,
+  type ClaudeLogger,
+} from "./claudeClient";
+import { enforceNote, type EnforceContext } from "./engine";
 import { loadPolicies, type Policy } from "./policyLoader";
-import { rolloverIncompleteTodos } from "./rollover";
 import {
   DEFAULT_SETTINGS,
   PolicyEnforcerSettingTab,
@@ -11,12 +13,14 @@ import {
 } from "./settings";
 
 const DAILY_NOTE_NAME = /^(\d{4}-\d{2}-\d{2})$/;
+const MIN_POLL_SECONDS = 15;
 
 export default class PolicyEnforcerPlugin extends Plugin {
   settings!: PolicyEnforcerSettings;
   private policies: Policy[] = [];
-  private readonly pendingByPath = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly lastSeen = new Map<string, number>();
   private readonly evaluating = new Set<string>();
+  private pollHandle: number | null = null;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -24,24 +28,32 @@ export default class PolicyEnforcerPlugin extends Plugin {
 
     this.app.workspace.onLayoutReady(() => {
       void this.refreshPolicies();
+      this.restartPolling();
     });
 
     this.registerEvent(
-      this.app.vault.on("modify", (file) => this.handleModify(file)),
-    );
-    this.registerEvent(
-      this.app.vault.on("create", (file) => this.handleCreate(file)),
+      this.app.vault.on("modify", (file) => {
+        if (file instanceof TFile && file.path === this.settings.policiesFile) {
+          void this.refreshPolicies();
+        }
+      }),
     );
 
     this.addCommand({
-      id: "policy-enforcer-check-active",
-      name: "Check active note",
+      id: "policy-enforcer-enforce-active",
+      name: "Enforce active note now",
       checkCallback: (checking) => {
         const file = this.app.workspace.getActiveFile();
         if (!file) return false;
-        if (!checking) void this.evaluate(file);
+        if (!checking) void this.enforce(file);
         return true;
       },
+    });
+
+    this.addCommand({
+      id: "policy-enforcer-poll-now",
+      name: "Run polling sweep now",
+      callback: () => void this.pollTick(),
     });
 
     this.addCommand({
@@ -49,6 +61,13 @@ export default class PolicyEnforcerPlugin extends Plugin {
       name: "Reload policies file",
       callback: () => void this.refreshPolicies(true),
     });
+  }
+
+  onunload(): void {
+    if (this.pollHandle !== null) {
+      window.clearInterval(this.pollHandle);
+      this.pollHandle = null;
+    }
   }
 
   async loadSettings(): Promise<void> {
@@ -59,75 +78,110 @@ export default class PolicyEnforcerPlugin extends Plugin {
     await this.saveData(this.settings);
   }
 
+  restartPolling(): void {
+    if (this.pollHandle !== null) {
+      window.clearInterval(this.pollHandle);
+      this.pollHandle = null;
+    }
+    const seconds = Math.max(MIN_POLL_SECONDS, this.settings.pollIntervalSeconds);
+    this.pollHandle = window.setInterval(() => void this.pollTick(), seconds * 1000);
+  }
+
   private async refreshPolicies(announce = false): Promise<void> {
     const path = this.settings.policiesFile;
     const file = this.app.vault.getAbstractFileByPath(path);
     if (!(file instanceof TFile)) {
       this.policies = [];
-      if (announce) new Notice(`Policy file not found: ${path}`);
+      if (announce) new Notice(`Policy Enforcer: policies file not found at ${path}`);
       return;
     }
     const content = await this.app.vault.read(file);
     this.policies = loadPolicies(content);
     if (announce) {
-      new Notice(`Loaded ${this.policies.length} polic${this.policies.length === 1 ? "y" : "ies"}.`);
+      new Notice(
+        `Policy Enforcer: loaded ${this.policies.length} polic${
+          this.policies.length === 1 ? "y" : "ies"
+        }.`,
+      );
     }
   }
 
-  private handleModify(file: TAbstractFile): void {
-    if (!(file instanceof TFile)) return;
-    if (file.extension !== "md") return;
-
-    if (file.path === this.settings.policiesFile) {
-      void this.refreshPolicies();
-      return;
+  private async pollTick(): Promise<void> {
+    if (this.policies.length === 0) return;
+    for (const file of this.filesInScope()) {
+      const last = this.lastSeen.get(file.path) ?? 0;
+      if (file.stat.mtime <= last) continue;
+      await this.enforce(file);
     }
+  }
 
-    if (!this.settings.enabledOnModify) return;
-    if (this.isExcluded(file.path)) return;
+  private filesInScope(): TFile[] {
+    const folders = new Set<string>(
+      [this.settings.dailyNotesFolder, ...this.settings.includedFolders].filter(
+        (s) => s.length > 0,
+      ),
+    );
+    if (folders.size === 0) return [];
+
+    return this.app.vault.getMarkdownFiles().filter((f) => {
+      if (f.path === this.settings.policiesFile) return false;
+      const parentPath = f.parent?.path ?? "";
+      return folders.has(parentPath);
+    });
+  }
+
+  private async enforce(file: TFile): Promise<void> {
     if (this.evaluating.has(file.path)) return;
-
-    const pending = this.pendingByPath.get(file.path);
-    if (pending) clearTimeout(pending);
-
-    const timer = setTimeout(() => {
-      this.pendingByPath.delete(file.path);
-      void this.evaluate(file);
-    }, this.settings.debounceMs);
-
-    this.pendingByPath.set(file.path, timer);
-  }
-
-  private async handleCreate(file: TAbstractFile): Promise<void> {
-    if (!this.settings.enabledOnDailyCreate) return;
-    if (!(file instanceof TFile)) return;
-    if (file.extension !== "md") return;
-
-    const match = DAILY_NOTE_NAME.exec(file.basename);
-    if (!match) return;
-    if (!this.isInDailyFolder(file)) return;
-
-    const previous = this.findPreviousDaily(file, match[1]);
-    if (!previous) return;
+    this.evaluating.add(file.path);
 
     try {
-      this.evaluating.add(file.path);
-      const prevContent = await this.app.vault.read(previous);
-      const todayContent = await this.app.vault.read(file);
-      const merged = rolloverIncompleteTodos(prevContent, todayContent);
-      if (merged !== todayContent) {
-        await this.app.vault.modify(file, merged);
+      const content = await this.app.vault.read(file);
+      const { binary, prefixArgs } = parseCommand(this.settings.claudeBinary);
+      const claude = new CliClaudeClient(binary, prefixArgs);
+      const context = await this.buildContext(file);
+
+      const outcome = await enforceNote({
+        noteContent: content,
+        notePath: file.path,
+        policies: this.policies,
+        claude,
+        context,
+        timeoutMs: this.settings.invocationTimeoutMs,
+        logger: this.buildLogger(file.path),
+      });
+
+      switch (outcome.kind) {
+        case "rewritten":
+          await this.app.vault.modify(file, outcome.content);
+          break;
+        case "error":
+          new Notice(`Policy Enforcer: ${outcome.error}`);
+          break;
       }
+
+      const fresh = this.app.vault.getAbstractFileByPath(file.path);
+      if (fresh instanceof TFile) {
+        this.lastSeen.set(file.path, fresh.stat.mtime);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      new Notice(`Policy Enforcer: ${message}`);
     } finally {
       this.evaluating.delete(file.path);
     }
   }
 
-  private isInDailyFolder(file: TFile): boolean {
-    const configured = this.settings.dailyNotesFolder;
-    if (configured.length === 0) return true;
-    const parentPath = file.parent?.path ?? "";
-    return parentPath === configured;
+  private async buildContext(file: TFile): Promise<EnforceContext | undefined> {
+    const dailyFolder = this.settings.dailyNotesFolder;
+    if (!dailyFolder) return undefined;
+    if ((file.parent?.path ?? "") !== dailyFolder) return undefined;
+    if (!DAILY_NOTE_NAME.test(file.basename)) return undefined;
+
+    const previous = this.findPreviousDaily(file, file.basename);
+    if (!previous) return undefined;
+
+    const content = await this.app.vault.read(previous);
+    return { previousDaily: { path: previous.path, content } };
   }
 
   private findPreviousDaily(current: TFile, currentDate: string): TFile | null {
@@ -140,34 +194,6 @@ export default class PolicyEnforcerPlugin extends Plugin {
       .sort((a, b) => (a.basename < b.basename ? 1 : -1));
 
     return siblings[0] ?? null;
-  }
-
-  private async evaluate(file: TFile): Promise<void> {
-    if (this.evaluating.has(file.path)) return;
-    this.evaluating.add(file.path);
-
-    try {
-      const content = await this.app.vault.read(file);
-      const { binary, prefixArgs } = parseCommand(this.settings.claudeBinary);
-      const claude = new CliClaudeClient(binary, prefixArgs);
-      const violations = await evaluateNote({
-        noteContent: content,
-        policies: this.policies,
-        claude,
-        timeoutMs: this.settings.invocationTimeoutMs,
-        logger: this.buildLogger(file.path),
-      });
-
-      const next = applyViolations(content, violations);
-      if (next !== content) {
-        await this.app.vault.modify(file, next);
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      new Notice(`Policy Enforcer: ${message}`);
-    } finally {
-      this.evaluating.delete(file.path);
-    }
   }
 
   private buildLogger(notePath: string): ClaudeLogger | undefined {
@@ -184,11 +210,5 @@ export default class PolicyEnforcerPlugin extends Plugin {
         );
       }
     };
-  }
-
-  private isExcluded(path: string): boolean {
-    return this.settings.excludeFolders.some(
-      (folder) => path === folder || path.startsWith(`${folder}/`),
-    );
   }
 }
